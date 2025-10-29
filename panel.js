@@ -15,50 +15,27 @@ const server = http.createServer(app);
 const io = new Server(server);
 const port = 3000;
 
-// Middleware for parsing form data
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// --- 3. Paths and Database ---
 const UPLOAD_PATH = path.join(__dirname, 'uploads');
 const BOTS_PATH = path.join(__dirname, 'bots');
-const DB_PATH = path.join(__dirname, 'bots.json');
 
-// Create folders/files if they don't exist
+// --- NEW: Use express.json() to read JSON from browser ---
+app.use(express.json());
+
 [UPLOAD_PATH, BOTS_PATH].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 });
-if (!fs.existsSync(DB_PATH)) {
-  fs.writeFileSync(DB_PATH, JSON.stringify({ bots: {} }));
-}
 
-// This will store our running bot processes { 'bot_name': process }
 let runningBots = {};
 
-// --- 4. Database Helper Functions ---
-const readDb = () => {
-  try {
-    return JSON.parse(fs.readFileSync(DB_PATH));
-  } catch (e) {
-    console.error('Error reading DB, resetting...', e);
-    fs.writeFileSync(DB_PATH, JSON.stringify({ bots: {} }));
-    return { bots: {} };
-  }
-};
-
-const writeDb = (data) => {
-  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-};
-
-// --- 5. Security (Password Protection) ---
+// --- 3. Security (Password Protection) ---
 // !!! CHANGE THIS PASSWORD !!!
 app.use(basicAuth({
-  users: { 'admin': 'your-pro-password-123' },
+  users: { 'admin': 'your-new-password-123' },
   challenge: true,
   realm: 'MyBotPanel',
 }));
 
-// --- 6. File Upload Setup (ZIP only) ---
+// --- 4. File Upload Setup (ZIP only) ---
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_PATH),
   filename: (req, file, cb) => cb(null, file.originalname)
@@ -70,29 +47,34 @@ const upload = multer({ storage: storage, fileFilter: (req, file, cb) => {
   cb(null, true);
 }});
 
-// --- 7. Helper Function to send logs to browser ---
+// --- 5. Helper Function to send logs to browser ---
 const sendLog = (socket, botname, message) => {
   const formattedMessage = `[${botname}]: ${message.toString()}`;
   console.log(formattedMessage);
   socket.emit('log', formattedMessage);
 };
 
-// --- 8. Main Panel Page ---
+// --- 6. Main Panel Page ---
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// --- 9. API to List Bots (Now reads from DB) ---
+// --- 7. API to List Bots ---
 app.get('/api/bots', (req, res) => {
-  const db = readDb();
-  const bots = Object.keys(db.bots).map(botName => ({
-    name: botName,
-    status: runningBots[botName] ? 'Running' : 'Stopped'
-  }));
-  res.json(bots);
+  fs.readdir(BOTS_PATH, { withFileTypes: true }, (err, entries) => {
+    if (err) return res.status(500).send('Error reading bots folder');
+    
+    const bots = entries
+      .filter(entry => entry.isDirectory())
+      .map(dir => ({
+        name: dir.name,
+        status: runningBots[dir.name] ? 'Running' : 'Stopped'
+      }));
+    res.json(bots);
+  });
 });
 
-// --- 10. API to Upload a Bot (.zip) ---
+// --- 8. API to Upload a Bot (.zip) ---
 app.post('/api/upload', upload.single('botfile'), async (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
 
@@ -101,69 +83,81 @@ app.post('/api/upload', upload.single('botfile'), async (req, res) => {
   const extractPath = path.join(BOTS_PATH, botName);
 
   try {
-    // 1. Stop bot if it's running
-    if (runningBots[botName]) {
-      runningBots[botName].kill();
-      delete runningBots[botName];
-      sendLog(io, botName, '--- Bot stopped for upgrade... ---');
-    }
-    // 2. Remove old folder if it exists
     if (fs.existsSync(extractPath)) {
       await fs.promises.rm(extractPath, { recursive: true, force: true });
     }
-    // 3. Create new folder and extract
     await fs.promises.mkdir(extractPath, { recursive: true });
     await extract(zipPath, { dir: extractPath });
-    await fs.promises.unlink(zipPath); // Delete zip
+    await fs.promises.unlink(zipPath);
 
-    // --- Auto-fix nested directories ---
     const files = await fs.promises.readdir(extractPath);
     if (files.length === 1) {
       const nestedPath = path.join(extractPath, files[0]);
-      if ((await fs.promises.stat(nestedPath)).isDirectory()) {
+      const stats = await fs.promises.stat(nestedPath);
+      
+      if (stats.isDirectory()) {
         sendLog(io, botName, '--- Nested directory detected. Promoting contents... ---');
         const nestedFiles = await fs.promises.readdir(nestedPath);
         for (const file of nestedFiles) {
           await fs.promises.rename(path.join(nestedPath, file), path.join(extractPath, file));
         }
         await fs.promises.rmdir(nestedPath);
+        sendLog(io, botName, '--- Contents promoted successfully. ---');
       }
     }
     
-    // --- Add to DB ---
-    const db = readDb();
-    if (!db.bots[botName]) {
-      db.bots[botName] = { env: {} };
-    }
-    writeDb(db);
-    
-    sendLog(io, botName, `--- ${botName} uploaded/upgraded successfully. ---`);
+    io.emit('log', `--- ${botName} uploaded and extracted successfully. ---`);
     io.emit('status_update');
     res.redirect('/');
   } catch (err) {
     console.error(err);
-    sendLog(io, botName, `--- Error uploading ${botName}: ${err.message} ---`);
+    io.emit('log', `--- Error uploading ${botName}: ${err.message} ---`);
     res.status(500).send('Error processing upload.');
   }
 });
 
-// --- 11. API to Manage Bots (Start, Stop, etc.) ---
+// --- 9. API to Manage Bots (Start, Stop, etc.) ---
 
+// Helper function to find the main script
 const getMainScript = (botPath) => {
   const packageJsonPath = path.join(botPath, 'package.json');
   if (fs.existsSync(packageJsonPath)) {
     try {
       const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
       if (pkg.main) return pkg.main;
-    } catch (e) { /* ignore */ }
+    } catch (e) { console.error('Invalid package.json:', e.message); }
   }
   if (fs.existsSync(path.join(botPath, 'index.js'))) return 'index.js';
   if (fs.existsSync(path.join(botPath, 'bot.js'))) return 'bot.js';
   return null;
 };
 
+// --- NEW HELPER: Get environment variables for a bot ---
+const getBotEnv = async (botPath) => {
+  // 1. Clone the panel's own environment
+  const baseEnv = { ...process.env };
+  
+  // 2. Define the path for the bot's custom env file
+  const envPath = path.join(botPath, '.env.json');
+  
+  // 3. If the file exists, read it, parse it, and merge it
+  if (fs.existsSync(envPath)) {
+    try {
+      const envFile = await fs.promises.readFile(envPath, 'utf8');
+      const botEnv = JSON.parse(envFile);
+      // Merge: The bot's custom env (botEnv) overwrites the base env
+      return { ...baseEnv, ...botEnv };
+    } catch (e) {
+      console.error(`Invalid .env.json for ${botPath}: ${e.message}`);
+      return baseEnv; // Return base env on error
+    }
+  }
+  // 4. If no file, just return the base env
+  return baseEnv;
+};
+
 // Start
-app.get('/api/start/:botname', (req, res) => {
+app.get('/api/start/:botname', async (req, res) => { // Now async
   const botname = req.params.botname;
   if (runningBots[botname]) return res.status(400).send('Bot is already running.');
 
@@ -171,26 +165,31 @@ app.get('/api/start/:botname', (req, res) => {
   const mainScript = getMainScript(botPath);
 
   if (!mainScript) {
+    const errorMsg = 'ERROR: Cannot find main script (index.js, bot.js, or "main" in package.json).';
+    sendLog(io, botname, errorMsg);
     return res.status(404).send('Bot main script not found.');
   }
   
-  // --- Load Env Vars from DB ---
-  const db = readDb();
-  const botEnv = db.bots[botname] ? db.bots[botname].env : {};
+  const mainScriptPath = path.join(botPath, mainScript);
+  if (!fs.existsSync(mainScriptPath)) {
+     const errorMsg = `ERROR: Main script "${mainScript}" not found.`;
+     sendLog(io, botname, errorMsg);
+     return res.status(404).send('Bot main script file not found.');
+  }
 
-  // Combine with process.env so bot can see PATH, etc.
-  const env = { ...process.env, ...botEnv };
+  // --- UPGRADED: Get the merged env variables ---
+  const botEnv = await getBotEnv(botPath);
 
-  // Run 'node' from *within* the bot's directory
+  // --- UPGRADED: Pass the 'env' object to spawn ---
   const botProcess = spawn('node', [mainScript], { 
-    cwd: botPath,
-    env: env // <-- Pass the environment variables
+    cwd: botPath, 
+    env: botEnv // This injects your keys!
   });
+  
   runningBots[botname] = botProcess;
 
   botProcess.stdout.on('data', (data) => sendLog(io, botname, data));
   botProcess.stderr.on('data', (data) => sendLog(io, botname, `ERROR: ${data}`));
-
   botProcess.on('close', (code) => {
     sendLog(io, botname, `--- stopped with code ${code} ---`);
     delete runningBots[botname];
@@ -216,7 +215,9 @@ app.get('/api/restart/:botname', (req, res) => {
   const botname = req.params.botname;
   if (runningBots[botname]) {
     runningBots[botname].once('close', () => {
-      setTimeout(() => app.get('/api/start/:botname', () => {})(req, res), 1000);
+      setTimeout(() => {
+        app.get('/api/start/:botname', () => {})(req, res);
+      }, 1000);
     });
     runningBots[botname].kill();
   } else {
@@ -228,17 +229,24 @@ app.get('/api/restart/:botname', (req, res) => {
 app.get('/api/install/:botname', (req, res) => {
   const botname = req.params.botname;
   const botPath = path.join(BOTS_PATH, botname);
-  if (runningBots[botname]) return res.status(400).send('Bot is running. Stop it first.');
+
   if (!fs.existsSync(path.join(botPath, 'package.json'))) {
+    sendLog(io, botname, 'No package.json found. Skipping install.');
     return res.status(400).send('No package.json found.');
   }
+  if (runningBots[botname]) {
+    sendLog(io, botname, 'Please stop the bot before installing dependencies.');
+    return res.status(400).send('Bot is running. Please stop it first.');
+  }
 
-  sendLog(io, botname, '--- Running "npm install"... ---');
+  sendLog(io, botname, '--- Running "npm install"... This may take a moment. ---');
   const installProcess = spawn('npm', ['install'], { cwd: botPath });
+
   installProcess.stdout.on('data', (data) => sendLog(io, botname, data));
   installProcess.stderr.on('data', (data) => sendLog(io, botname, `NPM_ERROR: ${data}`));
   installProcess.on('close', (code) => {
-    sendLog(io, botname, `--- "npm install" finished (code ${code}) ---`);
+    sendLog(io, botname, code === 0 ? '--- "npm install" completed successfully. ---' : `--- "npm install" failed with code ${code}. ---`);
+    io.emit('status_update');
   });
   res.send('Install process started.');
 });
@@ -246,19 +254,15 @@ app.get('/api/install/:botname', (req, res) => {
 // Delete Bot
 app.get('/api/delete/:botname', async (req, res) => {
   const botname = req.params.botname;
-  if (runningBots[botname]) return res.status(400).send('Bot is running. Stop it first.');
-  
+  if (runningBots[botname]) {
+    return res.status(400).send('Bot is running. Please stop it first.');
+  }
   const botPath = path.join(BOTS_PATH, botname);
-  const db = readDb();
-  
+  if (!fs.existsSync(botPath)) {
+    return res.status(404).send('Bot not found.');
+  }
   try {
-    if (fs.existsSync(botPath)) {
-      await fs.promises.rm(botPath, { recursive: true, force: true });
-    }
-    if (db.bots[botname]) {
-      delete db.bots[botname];
-      writeDb(db);
-    }
+    await fs.promises.rm(botPath, { recursive: true, force: true });
     sendLog(io, botname, '--- Bot project deleted successfully. ---');
     io.emit('status_update');
     res.send('Bot deleted');
@@ -268,62 +272,51 @@ app.get('/api/delete/:botname', async (req, res) => {
   }
 });
 
-// --- 12. NEW: Environment Variable APIs ---
-app.get('/api/env/:botname', (req, res) => {
+
+// --- 10. NEW API: Get/Set Environment Variables ---
+
+// Get Env Vars
+app.get('/api/env/:botname', async (req, res) => {
   const botname = req.params.botname;
-  const db = readDb();
-  if (!db.bots[botname]) {
-    return res.status(404).send('Bot not found');
+  const envPath = path.join(BOTS_PATH, botname, '.env.json');
+  
+  if (fs.existsSync(envPath)) {
+    // Send existing file
+    res.sendFile(envPath);
+  } else {
+    // Send an empty object so the modal isn't blank
+    res.json({});
   }
-  res.json(db.bots[botname].env || {});
 });
 
-app.post('/api/env/:botname', (req, res) => {
+// Save Env Vars
+app.post('/api/env/:botname', async (req, res) => {
   const botname = req.params.botname;
-  const { key, value } = req.body;
-  
-  if (!key || value === undefined) {
-    return res.status(400).send('Key and Value are required.');
-  }
-
-  const db = readDb();
-  if (!db.bots[botname]) {
-    return res.status(404).send('Bot not found');
+  if (runningBots[botname]) {
+    return res.status(400).send('Bot is running. Please stop it first.');
   }
   
-  db.bots[botname].env[key] = value;
-  writeDb(db);
+  const envPath = path.join(BOTS_PATH, botname, '.env.json');
   
-  sendLog(io, botname, `--- Env variable [${key}] added/updated. ---`);
-  res.send('Variable saved.');
-});
-
-app.post('/api/env/delete/:botname', (req, res) => {
-  const botname = req.params.botname;
-  const { key } = req.body;
-
-  if (!key) return res.status(400).send('Key is required.');
-
-  const db = readDb();
-  if (!db.bots[botname] || !db.bots[botname].env[key]) {
-    return res.status(404).send('Variable not found.');
+  try {
+    // Write the JSON, formatted nicely (null, 2)
+    await fs.promises.writeFile(envPath, JSON.stringify(req.body, null, 2));
+    sendLog(io, botname, '--- Environment variables saved successfully. ---');
+    res.send('Env saved');
+  } catch (err) {
+    sendLog(io, botname, `--- Error saving env: ${err.message} ---`);
+    res.status(500).send('Error saving env file.');
   }
-  
-  delete db.bots[botname].env[key];
-  writeDb(db);
-  
-  sendLog(io, botname, `--- Env variable [${key}] deleted. ---`);
-  res.send('Variable deleted.');
 });
 
 
-// --- 13. Start Server ---
+// --- 11. Start Server and Log Sockets ---
 io.on('connection', (socket) => {
   console.log('Panel user connected');
-  socket.emit('log', 'Welcome to your PRO Bot Panel!');
+  socket.emit('log', 'Welcome to your Bot Panel! Upload a .zip file to begin.');
 });
 
 server.listen(port, () => {
   console.log(`Bot Panel is running at http://localhost:${port}`);
-  console.log('Login with user: admin, pass: your-pro-password-123');
+  console.log('Login with user: admin, pass: your-new-password-123');
 });
