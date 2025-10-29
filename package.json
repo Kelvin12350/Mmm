@@ -1,7 +1,7 @@
 {
-  "name": "my-full-panel",
+  "name": "my-pro-panel",
   "version": "1.0.0",
-  "description": "A panel to deploy and manage Node.js bots.",
+  "description": "A full panel to deploy and manage Node.js bots with env vars.",
   "main": "panel.js",
   "scripts": {
     "start": "node panel.js"
