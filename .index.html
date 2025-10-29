@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bot Control Panel</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f0f2f5; margin: 0; }
+    .container { max-width: 1000px; margin: 20px auto; padding: 20px; background: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+    h1, h2 { color: #333; }
+    button { background: #007bff; color: #fff; border: none; padding: 8px 12px; border-radius: 5px; cursor: pointer; margin-right: 5px; }
+    button.stop { background: #dc3545; }
+    button.restart { background: #ffc107; color: #000; }
+    .bot-list { margin-top: 20px; }
+    .bot-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border: 1px solid #ddd; border-radius: 5px; margin-bottom: 10px; }
+    .bot-name { font-weight: bold; }
+    .status-Running { color: #28a745; }
+    .status-Stopped { color: #6c757d; }
+    .log-box { background: #222; color: #00ff00; padding: 15px; border-radius: 5px; height: 400px; overflow-y: scroll; font-family: "Courier New", monospace; margin-top: 20px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🚀 Bot Control Panel</h1>
+    
+    <h2>Upload New Bot</h2>
+    <form action="/api/upload" method="post" enctype="multipart/form-data">
+      <input type="file" name="botfile" accept=".js" required>
+      <button type="submit">Upload</button>
+    </form>
+    
+    <h2>Manage Bots</h2>
+    <div id="bot-list-container" class="bot-list">
+      </div>
+    
+    <h2>Live Logs</h2>
+    <div id="log-box" class="log-box">
+      Connecting to server...
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+
+  <script>
+    const botListContainer = document.getElementById('bot-list-container');
+    const logBox = document.getElementById('log-box');
+
+    // --- 1. Connect to Socket.IO Server ---
+    const socket = io();
+
+    socket.on('connect', () => {
+      logBox.innerHTML = 'Connected to server. Waiting for logs... \n';
+    });
+    
+    // --- 2. Listen for new logs ---
+    socket.on('log', (message) => {
+      logBox.innerHTML += `${message}\n`;
+      logBox.scrollTop = logBox.scrollHeight; // Auto-scroll to bottom
+    });
+    
+    // --- 3. Listen for status updates ---
+    socket.on('status_update', () => {
+      fetchBotList();
+    });
+
+    // --- 4. Function to call API (Start, Stop, etc) ---
+    async function callBotApi(endpoint) {
+      await fetch(endpoint);
+      // No need to manually refresh, the 'status_update' event will
+    }
+
+    // --- 5. Function to fetch and display bot list ---
+    async function fetchBotList() {
+      const response = await fetch('/api/bots');
+      const bots = await response.json();
+      
+      botListContainer.innerHTML = ''; // Clear old list
+      
+      if (bots.length === 0) {
+        botListContainer.innerHTML = '<p>No bots uploaded yet.</p>';
+        return;
+      }
+      
+      bots.forEach(bot => {
+        const botDiv = document.createElement('div');
+        botDiv.className = 'bot-item';
+        
+        const isRunning = bot.status === 'Running';
+        
+        botDiv.innerHTML = `
+          <div>
+            <span class="bot-name">${bot.name}</span>
+            <span class="status-${bot.status}">(${bot.status})</span>
+          </div>
+          <div>
+            <button onclick="callBotApi('/api/start/${bot.name}')" ${isRunning ? 'disabled' : ''}>Start</button>
+            <button class="stop" onclick="callBotApi('/api/stop/${bot.name}')" ${!isRunning ? 'disabled' : ''}>Stop</button>
+            <button class="restart" onclick="callBotApi('/api/restart/${bot.name}')">Restart</button>
+          </div>
+        `;
+        botListContainer.appendChild(botDiv);
+      });
+    }
+
+    // Load the bot list when the page loads
+    fetchBotList();
+  </script>
+</body>
+</html>
