@@ -15,16 +15,13 @@ const server = http.createServer(app);
 const io = new Server(server);
 const port = 3000;
 
-// Bots are now extracted into their own folders in 'bots'
 const UPLOAD_PATH = path.join(__dirname, 'uploads');
 const BOTS_PATH = path.join(__dirname, 'bots');
 
-// Create folders if they don't exist
 [UPLOAD_PATH, BOTS_PATH].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 });
 
-// This will store our running bot processes { 'bot_folder_name': process }
 let runningBots = {};
 
 // --- 3. Security (Password Protection) ---
@@ -93,6 +90,32 @@ app.post('/api/upload', upload.single('botfile'), async (req, res) => {
     await extract(zipPath, { dir: extractPath });
     // 4. Delete the uploaded zip file
     await fs.promises.unlink(zipPath);
+
+    // -----------------------------------------------------------------
+    // --- ⭐️ NEW UPGRADE: Auto-fix nested directories ⭐️ ---
+    // -----------------------------------------------------------------
+    const files = await fs.promises.readdir(extractPath);
+    if (files.length === 1) {
+      const nestedPath = path.join(extractPath, files[0]);
+      const stats = await fs.promises.stat(nestedPath);
+      
+      if (stats.isDirectory()) {
+        // It's a nested folder. Promote its contents.
+        sendLog(io, botName, '--- Nested directory detected. Promoting contents... ---');
+        
+        const nestedFiles = await fs.promises.readdir(nestedPath);
+        for (const file of nestedFiles) {
+          const oldPath = path.join(nestedPath, file);
+          const newPath = path.join(extractPath, file);
+          await fs.promises.rename(oldPath, newPath);
+        }
+        
+        // Remove the now-empty nested directory
+        await fs.promises.rmdir(nestedPath);
+        sendLog(io, botName, '--- Contents promoted successfully. ---');
+      }
+    }
+    // -----------------------------------------------------------------
     
     io.emit('log', `--- ${botName} uploaded and extracted successfully. ---`);
     io.emit('status_update'); // Tell browser to refresh bot list
@@ -132,13 +155,15 @@ app.get('/api/start/:botname', (req, res) => {
   const mainScript = getMainScript(botPath);
 
   if (!mainScript) {
-    sendLog(io, botname, 'ERROR: Cannot find main script (index.js, bot.js, or "main" in package.json).');
+    const errorMsg = 'ERROR: Cannot find main script (index.js, bot.js, or "main" in package.json).';
+    sendLog(io, botname, errorMsg);
     return res.status(404).send('Bot main script not found.');
   }
   
   const mainScriptPath = path.join(botPath, mainScript);
   if (!fs.existsSync(mainScriptPath)) {
-     sendLog(io, botname, `ERROR: Main script "${mainScript}" not found in bot folder.`);
+     const errorMsg = `ERROR: Main script "${mainScript}" (from package.json?) not found in bot folder.`;
+     sendLog(io, botname, errorMsg);
      return res.status(404).send('Bot main script file not found.');
   }
 
@@ -185,7 +210,7 @@ app.get('/api/restart/:botname', (req, res) => {
   }
 });
 
-// NEW: Install Dependencies
+// Install Dependencies
 app.get('/api/install/:botname', (req, res) => {
   const botname = req.params.botname;
   const botPath = path.join(BOTS_PATH, botname);
@@ -211,14 +236,14 @@ app.get('/api/install/:botname', (req, res) => {
     if (code === 0) {
       sendLog(io, botname, '--- "npm install" completed successfully. ---');
     } else {
-      sendLog(io, botname, `--- "npm install" failed with code ${code}. ---`);
+      sendLog(io, botname, `--- "npm install" failed with code ${code}. ---');
     }
     io.emit('status_update');
   });
   res.send('Install process started.');
 });
 
-// NEW: Delete Bot
+// Delete Bot
 app.get('/api/delete/:botname', async (req, res) => {
   const botname = req.params.botname;
   if (runningBots[botname]) {
