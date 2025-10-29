@@ -13,6 +13,7 @@
     button.stop { background: #ff4d4f; }
     button.restart { background: #ffc107; color: #000; }
     button.install { background: #17a2b8; }
+    button.env { background: #5a6268; } /* New Button */
     button.delete { background: #6c757d; }
     .bot-list { margin-top: 20px; }
     .bot-item { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; padding: 15px; border: 1px solid #ddd; border-radius: 5px; margin-bottom: 10px; }
@@ -23,6 +24,48 @@
     .status-Stopped { color: #6c757d; font-weight: bold; }
     .log-box { background: #222; color: #00ff00; padding: 15px; border-radius: 5px; height: 400px; overflow-y: scroll; font-family: "Courier New", monospace; margin-top: 20px; white-space: pre-wrap; }
     input[type="file"] { margin-right: 10px; }
+    
+    /* --- New Modal Styles --- */
+    dialog {
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      padding: 0;
+      width: 500px;
+    }
+    dialog::backdrop {
+      background: rgba(0, 0, 0, 0.5);
+    }
+    .dialog-header {
+      padding: 15px 20px;
+      border-bottom: 1px solid #eee;
+    }
+    .dialog-header h3 { margin: 0; }
+    .dialog-body {
+      padding: 20px;
+    }
+    .dialog-body p { margin-top: 0; font-size: 0.9em; color: #666; }
+    .dialog-footer {
+      padding: 15px 20px;
+      background: #f9f9f9;
+      border-top: 1px solid #eee;
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+    #env-textarea {
+      width: 100%;
+      height: 200px;
+      box-sizing: border-box; /* Important */
+      font-family: "Courier New", monospace;
+      font-size: 14px;
+    }
+    #env-error {
+      color: #dc3545;
+      font-size: 0.9em;
+      margin-top: 10px;
+      display: none; /* Hidden by default */
+    }
   </style>
 </head>
 <body>
@@ -45,11 +88,36 @@
     </div>
   </div>
 
+  <dialog id="env-modal">
+    <div class="dialog-header">
+      <h3 id="env-modal-title">Environment Variables</h3>
+    </div>
+    <div class="dialog-body">
+      <p>Enter variables in JSON format. Your bot will read these as <code>process.env.YOUR_KEY</code>.</p>
+      <textarea id="env-textarea"></textarea>
+      <div id="env-error">Error: Invalid JSON.</div>
+    </div>
+    <div class="dialog-footer">
+      <button id="env-modal-close">Close</button>
+      <button id="env-modal-save">Save</button>
+    </div>
+  </dialog>
+
+
   <script src="/socket.io/socket.io.js"></script>
 
   <script>
     const botListContainer = document.getElementById('bot-list-container');
     const logBox = document.getElementById('log-box');
+    
+    // --- New Modal Elements ---
+    const envModal = document.getElementById('env-modal');
+    const envModalTitle = document.getElementById('env-modal-title');
+    const envTextarea = document.getElementById('env-textarea');
+    const envError = document.getElementById('env-error');
+    const envModalClose = document.getElementById('env-modal-close');
+    const envModalSave = document.getElementById('env-modal-save');
+    let currentEditingBot = ''; // Store which bot we are editing
 
     // --- 1. Connect to Socket.IO Server ---
     const socket = io();
@@ -81,17 +149,63 @@
       } catch (err) {
         logBox.innerHTML += `> Network Error: ${err.message}\n`;
       }
-      // No need to manually refresh, 'status_update' event will
     }
     
-    // --- 5. NEW: Function for DELETE confirmation ---
+    // --- 5. Function for DELETE confirmation ---
     function deleteBot(botname) {
       if (confirm(`Are you sure you want to permanently delete "${botname}"? This cannot be undone.`)) {
         callBotApi(`/api/delete/${botname}`);
       }
     }
+    
+    // --- 6. NEW: Functions to open/close/save Env Modal ---
+    async function openEnvModal(botname) {
+      currentEditingBot = botname;
+      envModalTitle.innerText = `Env Vars for: ${botname}`;
+      envError.style.display = 'none'; // Hide error
+      
+      try {
+        const response = await fetch(`/api/env/${botname}`);
+        const data = await response.json();
+        // Format the JSON nicely (null, 2)
+        envTextarea.value = JSON.stringify(data, null, 2);
+      } catch (e) {
+        envTextarea.value = '{\n  "ERROR": "Could not load .env.json"\n}';
+      }
+      envModal.showModal();
+    }
 
-    // --- 6. Function to fetch and display bot list ---
+    envModalClose.onclick = () => {
+      envModal.close();
+    };
+
+    envModalSave.onclick = async () => {
+      let envData;
+      // Validate the JSON before sending
+      try {
+        envData = JSON.parse(envTextarea.value);
+        envError.style.display = 'none';
+      } catch (e) {
+        envError.style.display = 'block';
+        return; // Stop if JSON is bad
+      }
+      
+      logBox.innerHTML += `> Saving env for ${currentEditingBot}...\n`;
+      
+      await fetch(`/api/env/${currentEditingBot}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(envData),
+      });
+      
+      logBox.innerHTML += `> Env saved. Restart the bot to apply changes.\n`;
+      envModal.close();
+    };
+
+
+    // --- 7. Function to fetch and display bot list ---
     async function fetchBotList() {
       const response = await fetch('/api/bots');
       const bots = await response.json();
@@ -119,6 +233,7 @@
             <button class="stop" onclick="callBotApi('/api/stop/${bot.name}')" ${!isRunning ? 'disabled' : ''}>Stop</button>
             <button class="restart" onclick="callBotApi('/api/restart/${bot.name}')">Restart</button>
             <button class="install" onclick="callBotApi('/api/install/${bot.name}')" ${isRunning ? 'disabled' : ''}>Install Dependencies</button>
+            <button class="env" onclick="openEnvModal('${bot.name}')" ${isRunning ? 'disabled' : ''}>Env Vars</button>
             <button class="delete" onclick="deleteBot('${bot.name}')" ${isRunning ? 'disabled' : ''}>Delete</button>
           </div>
         `;
